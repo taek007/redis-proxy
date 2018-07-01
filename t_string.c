@@ -13,73 +13,163 @@ extern struct redisServer server;
 #define REDIS_SET_NX (1<<0)     // Set if key not exists.
 #define REDIS_SET_XX (1<<1)     // Set if key exists.
 
-static inline ulong hash_func(char *arKey) {
-    register ulong hash = 5381;
-	uint nKeyLength = strlen(arKey);
-    /* variant with the hash unrolled eight times */
-    for (; nKeyLength >= 8; nKeyLength -= 8) {
-        hash = ((hash << 5) + hash) + *arKey++;
-        hash = ((hash << 5) + hash) + *arKey++;
-        hash = ((hash << 5) + hash) + *arKey++;
-        hash = ((hash << 5) + hash) + *arKey++;
-        hash = ((hash << 5) + hash) + *arKey++;
-        hash = ((hash << 5) + hash) + *arKey++;
-        hash = ((hash << 5) + hash) + *arKey++;
-        hash = ((hash << 5) + hash) + *arKey++;
+
+
+int rp_queue_push(rp_queue_t *queue, void *data);
+void *rp_queue_shift(rp_queue_t *queue);
+
+int rp_queue_push(rp_queue_t *queue, void *data)
+{printf("ccccccc\n");
+
+
+    rp_queue_element_t *qe;
+
+    if((qe = malloc(sizeof(rp_queue_element_t))) == NULL) {
+        syslog(LOG_ERR, "malloc at %s:%d - %s", __FILE__, __LINE__, strerror(errno));
+        return 1;
     }
-    switch (nKeyLength) {
-        case 7: hash = ((hash << 5) + hash) + *arKey++; /* fallthrough... */
-        case 6: hash = ((hash << 5) + hash) + *arKey++; /* fallthrough... */
-        case 5: hash = ((hash << 5) + hash) + *arKey++; /* fallthrough... */
-        case 4: hash = ((hash << 5) + hash) + *arKey++; /* fallthrough... */
-        case 3: hash = ((hash << 5) + hash) + *arKey++; /* fallthrough... */
-        case 2: hash = ((hash << 5) + hash) + *arKey++; /* fallthrough... */
-        case 1: hash = ((hash << 5) + hash) + *arKey++; break;
-        case 0: break;
+    if(queue->size) {
+        qe->prev = queue->last;
+        queue->last->next = qe;
+    } else {
+        qe->next = qe->prev = NULL;
+        queue->first = qe;
     }
-    return hash;
-} 
+    qe->data = data;
+    qe->next = NULL;
+    queue->last = qe;
+    queue->size++;
+    return 0;
+}
+void *rp_queue_shift(rp_queue_t *queue)
+{
+    void *data;
+    rp_queue_element_t *qe;
+
+    if((qe = queue->first) != NULL) {
+        if(--queue->size) {
+            queue->first = qe->next;
+            queue->first->prev = NULL;
+        } else {
+            queue->first = queue->last = NULL;
+        }
+        data = qe->data;
+       // free(qe);
+        return data;
+    }
+    return NULL;
+}
 void setGenericCommand(redisClient *c, int flags, robj *key, robj *val, robj *expire, int unit, robj *ok_reply, robj *abort_reply) {
+	//printf("eeeeeeeeeee %s\n", c->querybuf_server);
+	int mod=0;
+	//robj *value2 = createRawStringObject(c->querybuf_server, sdslen(c->querybuf_server));
+	//server.sev_pools ->sev[mod]->client  = c;
+
+//	robj *value2 = (robj*)malloc(sizeof(robj));
+//	value2->ptr = (char*)malloc(sizeof(500));
+//	memset(value2->ptr, 0, 500);
+//	memcpy(value2->ptr,"*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$3\r\nabc\r\n", 500);
+
+	//addReply2(server.sev_pools ->sev[mod], value2 ? value2 : shared.ok);
+	//c->server = server.sev_pools ->sev[mod];
+	//server.sev_pools ->sev[mod]->client  = c;
+	//	initRealServer();
+
+//char* msg ="*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$3\r\nabcd\r\n";
+//printf("%s\n", msg);
+
+	printf("setGenericCommand client fd %d\n", c->fd);
+	printf("argc %d\n", c->argc);
+	printf("value is %s\n", c->argv[0]->ptr);
+	printf("value is %s\n", c->argv[1]->ptr);
+//	printf("value is %s\n", c->argv[2]->ptr);
+	redisClient *cd;
+	cd = server.sev_pools ->sev[mod];
+
+	//对应是set 类型
+	cd->type = RETURN_SET;
+//cd->client = c;
+//	 aeCreateFileEvent(server.el, c->server->fd, AE_WRITABLE, sendReplyToServer, c->server);
+//size_t available = sizeof(c->server->buf) - c->server->bufpos; // 可用的空间数
+//int len = strlen(msg);
+//	// 回复链表中已经有内容了,再添加内容到c->buf中就是错误了.
+//	if (listLength(c->server->reply) > 0) return REDIS_ERR;
+//
+//	if (len > available) return REDIS_ERR; // 必须要有充足的空间
+//
+//	memcpy(c->server->buf + c->server->bufpos, msg, len);
+//	c->server->bufpos += len;
+
+	rp_queue_push(&cd->queue, c);
+	
+
+//	addReply2(server.sev_pools ->sev[mod], "*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$5\r\nabc12\r\n");
+
+	robj *value2 = createRawStringObject(c->querybuf_server, sdslen(c->querybuf_server));
+
+	addReply2(cd, value2);
+//	addReply2(cd, "*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$5\r\nabc12\r\n");
+	//addReply(c, ok_reply ? ok_reply : shared.ok);
+	return;
+
 	long long milliseconds = 0; // 微秒
 	if (expire) { // 取出过期时间 
-		// todo
+		if (getLongLongFromObjectOrReply(c, expire, &milliseconds, NULL) != REDIS_OK)
+			return;
+
+		/* expire 参数的值不正确时报错 */
+		if (milliseconds <= 0) {
+			addReplyError(c, "invalid expire time in SETEX");
+			return;
+		}
+
+		/* 不论输入的过期时间是秒还是毫秒
+		 * Redis 实际都以毫秒的形式保存过期时间
+		 * 如果输入的过期时间为秒，那么将它转换为毫秒 */
+		if (unit == UNIT_SECONDS) milliseconds *= 1000;
 	}
-	// todo 不需要了zhangming
-	//setKey(c->db, key, val); // 将键值关联到数据库
+	/* 如果设置了 NX 或者 XX 参数，那么检查条件是否不符合这两个设置
+	 * 在条件不符合时报错，报错的内容由 abort_reply 参数决定 */
+	if ((flags & REDIS_SET_NX && lookupKeyWrite(c->db, key) != NULL) ||
+		(flags & REDIS_SET_XX && lookupKeyWrite(c->db, key) == NULL))
+	{
+		addReply(c, abort_reply ? abort_reply : shared.nullbulk);
+		return;
+	}
+	char *str1 = key->ptr;
+	char *str2 = val->ptr;
+	setKey(c->db, key, val); // 将键值关联到数据库
+	server.dirty++; /* 将数据库设为脏 */
 
-	printf("the key is %s\n", (char*)key->ptr);
-	ulong h = hash_func( (char*)key->ptr);
-	printf("the key hash is %ld\n", h);
-	int mod = h % 5;
+	/* 为键设置过期时间 */
+	if (expire) setExpire(c->db, key, mstime() + milliseconds);
 	
-	printf("the mod 5 is %d\n", mod);
 	// 设置成功,向客户端发送回复,回复的内容由ok_reply决定
-
-	/*
-	真正的real server 是 server.sev_pools ->sev[mod].fd
-	*/
-	mod = 0;
-
-	robj *value = (robj*)malloc(sizeof(robj));
-	value->ptr = (char*)malloc(sizeof(500));
-	memset(value->ptr, 0, 500);
-	memcpy(value->ptr,"*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$3\r\nabc\r\n", 500);
-
-	//memcpy(value->ptr,"*3\n", 500);
-
-	printf("开始向real redis 3 发送数据  %s\n", (char*)(value->ptr));
-	
-	//记录下server对应的client fd
-	server.sev_pools ->sev[mod]->client  = c;
-	addReply2(server.sev_pools ->sev[mod], value ? value : shared.ok);
-	
-	
-	//addReply(c, ok_reply ? ok_reply : shared.ok);
+	addReply(c, ok_reply ? ok_reply : shared.ok);
 }
 
 
 int getGenericCommand(redisClient *c) {
 	robj *o;
+
+	int mod=0;
+	printf("getGenericCommand client fd %d\n", c->fd);
+	printf("argc %d\n", c->argc);
+	printf("value is %s\n", c->argv[0]->ptr);
+	printf("value is %s\n", c->argv[1]->ptr);
+
+	redisClient *cd;
+	cd = server.sev_pools ->sev[mod];
+
+	//对应是get 类型
+	cd->type =RETURN_GET;
+	rp_queue_push(&cd->queue, c);
+	printf("%s\n", c->querybuf_server);
+	robj *value2 = createRawStringObject(c->querybuf_server, sdslen(c->querybuf_server));
+
+	addReply2(cd, value2);
+
+	return;
 	// 尝试从数据库中取出键为c->argv[1]对应的值对象,如果键不存在时,向客户端发送回复信息,
 	// 并返回NULL 
 	if ((o = lookupKeyReadOrReply(c, c->argv[1], shared.nullbulk)) == NULL)
@@ -206,6 +296,10 @@ void appendCommand(redisClient *c) {
 		o->ptr = sdscatlen(o->ptr, append->ptr, sdslen(append->ptr));
 		totlen = sdslen(o->ptr);
 	}
+
+	signalModifiedKey(c->db, c->argv[1]); /* 向数据库发送键被修改的信号 */
+
+	server.dirty++; /* 将服务器设为脏 */
 	// 发送回复
 	addReplyLongLong(c, totlen);
 }
@@ -258,6 +352,8 @@ void setrangeCommand(redisClient *c) {
 		o->ptr = sdsgrowzero(o->ptr, offset + sdslen(value));
 		// 将value的值复制到字符串中指定的位置
 		memcpy((char *)o->ptr + offset, value, sdslen(value));
+		signalModifiedKey(c->db, c->argv[1]); /* 向数据库发送键被修改的信号 */
+		server.dirty++; /* 将服务器设为脏 */
 	}
 	// 设置成功,返回新的字符串值给客户端
 	addReplyLongLong(c, sdslen(o->ptr));
@@ -316,6 +412,20 @@ void strlenCommand(redisClient *c) {
 }
 
 void incrDecrCommand(redisClient *c, long long incr) {
+	printf("incrDecrCommand content %s\n", c->querybuf_server);
+	
+	int mod = 0;
+	redisClient *cd;
+	cd = server.sev_pools ->sev[mod];
+	
+	//对应是hset 类型
+	cd->type = RETURN_HSET;
+	rp_queue_push(&cd->queue, c);
+	robj *value2 = createRawStringObject(c->querybuf_server, sdslen(c->querybuf_server));
+
+	addReply2(cd, value2);
+	return ;
+
 	long long value, oldvalue;
 	robj *o, *new;
 
@@ -341,7 +451,13 @@ void incrDecrCommand(redisClient *c, long long incr) {
 	value += incr;
 	new = createStringObjectFromLongLong(value);
 	
-	dbOverwrite(c->db, c->argv[1], new);
+	/* 向数据库发送键被修改的信号 */
+	signalModifiedKey(c->db, c->argv[1]);
+	server.dirty++; /* 将服务器设为脏 */
+	if (o)
+		dbOverwrite(c->db, c->argv[1], new);
+	else
+		dbAdd(c->db, c->argv[1], new);
 	addReply(c, shared.colon);
 	addReply(c, new);
 	addReply(c, shared.crlf);
@@ -406,7 +522,8 @@ void msetGenericCommand(redisClient *c, int nx) {
 		c->argv[j + 1] = tryObjectEncoding(c->argv[j + 1]);
 		setKey(c->db, c->argv[j], c->argv[j + 1]);
 	}
-	// mset返回ok,而msetnx返回1
+	server.dirty++; /* 将服务器设为脏 */
+	/* mset返回ok,而msetnx返回1 */
 	addReply(c, nx ? shared.cone : shared.ok);
 }
 

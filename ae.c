@@ -15,9 +15,25 @@
 #include "zmalloc.h"
 #include "aeepoll.h"
 
+/*
+ * 删除事件处理器
+ */
+void aeDeleteEventLoop(aeEventLoop *eventLoop) {
+	aeApiFree(eventLoop);
+	zfree(eventLoop->events);
+	zfree(eventLoop->fired);
+	zfree(eventLoop);
+}
 
 /*
- * 取出当前时间的秒和毫秒,
+ * 设置处理事件前需要被执行的函数
+ */
+void aeSetBeforeSleepProc(aeEventLoop *eventLoop, aeBeforeSleepProc *beforesleep) {
+	eventLoop->beforesleep = beforesleep;
+}
+
+/*
+ * 取出当前时间的秒和毫秒，
  * 并分别将它们保存到 seconds 和 milliseconds 参数中
  */
 static void aeGetTime(long *seconds, long *milliseconds)
@@ -60,8 +76,10 @@ aeEventLoop *aeCreateEventLoop(int setsize) { // 创建一个EventLoop,我只是
 	// Events with mask == AE_NONE are not set. So let's initialize the
 	// vector with it.
 	// 初始化监听事件
-	for (i = 0; i < setsize; i++)
+	for (i = 0; i < setsize; i++) {
+		
 		eventLoop->events[i].mask = AE_NONE; // 表示不监听任何的事件
+	}
 
 	// 返回事件循环
 	return eventLoop;
@@ -343,16 +361,20 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
 			if (tvp->tv_usec < 0) tvp->tv_usec = 0;
 		}
 		else {
+			 tv.tv_sec = 0;
+        tv.tv_usec = 100000;
+		tvp = &tv;
 			// 执行到这一步，说明没有时间事件
 			// 那么根据 AE_DONT_WAIT 是否设置来决定是否阻塞，以及阻塞的时间长度
-			if (flags & AE_DONT_WAIT) {
-				// 设置文件事件不阻塞
-				tv.tv_sec = tv.tv_usec = 0;
-				tvp = &tv;
-			}
-			else {
+//			if (flags & AE_DONT_WAIT)
+//			{
+//				// 设置文件事件不阻塞
+//				tv.tv_sec = tv.tv_usec = 0;
+//				tvp = &tv;
+//			}
+//			else {
 				tvp = NULL; // 文件事件可以阻塞直到有事件到达为止
-			}
+//			}
 		}
 
 		// 处理文件事件，阻塞时间由 tvp 决定, 总之,如果有事件的话,一定要等到有事件发生才返回

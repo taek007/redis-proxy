@@ -1,5 +1,5 @@
 CC	:= gcc
-CFLAGS:= -w -std=gnu99 -ggdb -ffunction-sections 
+CFLAGS:= -pg -w -std=gnu99 -ggdb -ffunction-sections 
 LFLAGS	:= -lpthread
 BINS 	:= redis
 SRCS	:= $(wildcard *.c) # 当前目录下的所有的.c文件 

@@ -9,7 +9,9 @@ robj *createObject(int type, void *ptr);
 robj *createEmbeddedStringObject(char *ptr, size_t len);
 robj *createRawStringObject(char *ptr, size_t len);
 robj *createStringObject(char *ptr, size_t len);
-robj *createObject(int type, void *ptr);
+robj *createHashObject(void);
+robj *createObject(int type, void *ptr); 
+robj *createStringObjectFromLongDouble(long double value);
 void freeStringObject(robj *o);
 void decrRefCount(robj *o);
 void decrRefCountVoid(void *o);
@@ -24,5 +26,18 @@ robj *getDecodedObject(robj *o);
 
 size_t stringObjectLen(robj *o);
 robj *createStringObjectFromLongLong(long long value);
+void freeListObject(robj *o);
+robj *createZiplistObject(void);
 
+robj* createIntsetObject(void);
+int isObjectRepresentableAsLongLong(robj *o, long long *llval);
+
+int isObjectRepresentableAsLongLong(robj *o, long long *llval);
+int getDoubleFromObject(robj *o, double *target);
+robj *createZsetObject(void);
+robj* createZsetZiplistObject(void);
+int compareStringObjectsWithFlags(robj *a, robj *b, int flags);
+int compareStringObjects(robj *a, robj *b);
+int equalStringObjects(robj *a, robj *b);
+robj *createListObject(void);
 #endif

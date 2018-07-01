@@ -13,6 +13,134 @@
 
 #define LOG_SIZE 1024
 
+/* Glob-style pattern matching. */
+int stringmatchlen(const char *pattern, int patternLen,
+	const char *string, int stringLen, int nocase)
+{
+	while (patternLen) {
+		switch (pattern[0]) {
+		case '*':
+			while (pattern[1] == '*') {
+				pattern++;
+				patternLen--;
+			}
+			if (patternLen == 1)
+				return 1; /* match */
+			while (stringLen) {
+				if (stringmatchlen(pattern + 1, patternLen - 1,
+					string, stringLen, nocase))
+					return 1; /* match */
+				string++;
+				stringLen--;
+			}
+			return 0; /* no match */
+			break;
+		case '?':
+			if (stringLen == 0)
+				return 0; /* no match */
+			string++;
+			stringLen--;
+			break;
+		case '[':
+		{
+			int not, match;
+
+			pattern++;
+			patternLen--;
+			not = pattern[0] == '^';
+			if (not) {
+				pattern++;
+				patternLen--;
+			}
+			match = 0;
+			while (1) {
+				if (pattern[0] == '\\') {
+					pattern++;
+					patternLen--;
+					if (pattern[0] == string[0])
+						match = 1;
+				}
+				else if (pattern[0] == ']') {
+					break;
+				}
+				else if (patternLen == 0) {
+					pattern--;
+					patternLen++;
+					break;
+				}
+				else if (pattern[1] == '-' && patternLen >= 3) {
+					int start = pattern[0];
+					int end = pattern[2];
+					int c = string[0];
+					if (start > end) {
+						int t = start;
+						start = end;
+						end = t;
+					}
+					if (nocase) {
+						start = tolower(start);
+						end = tolower(end);
+						c = tolower(c);
+					}
+					pattern += 2;
+					patternLen -= 2;
+					if (c >= start && c <= end)
+						match = 1;
+				}
+				else {
+					if (!nocase) {
+						if (pattern[0] == string[0])
+							match = 1;
+					}
+					else {
+						if (tolower((int)pattern[0]) == tolower((int)string[0]))
+							match = 1;
+					}
+				}
+				pattern++;
+				patternLen--;
+			}
+			if (not)
+				match = !match;
+			if (!match)
+				return 0; /* no match */
+			string++;
+			stringLen--;
+			break;
+		}
+		case '\\':
+			if (patternLen >= 2) {
+				pattern++;
+				patternLen--;
+			}
+			/* fall through */
+		default:
+			if (!nocase) {
+				if (pattern[0] != string[0])
+					return 0; /* no match */
+			}
+			else {
+				if (tolower((int)pattern[0]) != tolower((int)string[0]))
+					return 0; /* no match */
+			}
+			string++;
+			stringLen--;
+			break;
+		}
+		pattern++;
+		patternLen--;
+		if (stringLen == 0) {
+			while (*pattern == '*') {
+				pattern++;
+				patternLen--;
+			}
+			break;
+		}
+	}
+	if (patternLen == 0 && stringLen == 0)
+		return 1;
+	return 0;
+}
 /*
  * 一个简易的日志函数.
  */
@@ -132,4 +260,47 @@ int string2l(const char *s, size_t slen, long *lval) {
 
 	*lval = (long)llval;
 	return 1;
+}
+
+
+/* Convert a double to a string representation. Returns the number of bytes
+* required. The representation should always be parsable by stdtod(3). */
+int d2string(char *buf, size_t len, double value) {
+	if (isnan(value)) {
+		len = snprintf(buf, len, "nan");
+	}
+	else if (isinf(value)) {
+		if (value < 0)
+			len = snprintf(buf, len, "-inf");
+		else
+			len = snprintf(buf, len, "inf");
+	}
+	else if (value == 0) {
+		/* See: http://en.wikipedia.org/wiki/Signed_zero, "Comparisons". */
+		if (1.0 / value < 0)
+			len = snprintf(buf, len, "-0");
+		else
+			len = snprintf(buf, len, "0");
+	}
+	else {
+#if (DBL_MANT_DIG >= 52) && (LLONG_MAX == 0x7fffffffffffffffLL)
+		/* Check if the float is in a safe range to be casted into a
+		* long long. We are assuming that long long is 64 bit here.
+		* Also we are assuming that there are no implementations around where
+		* double has precision < 52 bit.
+		*
+		* Under this assumptions we test if a double is inside an interval
+		* where casting to long long is safe. Then using two castings we
+		* make sure the decimal part is zero. If all this is true we use
+		* integer printing function that is much faster. */
+		double min = -4503599627370495; /* (2^52)-1 */
+		double max = 4503599627370496; /* -(2^52) */
+		if (value > min && value < max && value == ((double)((long long)value)))
+			len = ll2string(buf, len, (long long)value);
+		else
+#endif
+			len = snprintf(buf, len, "%.17g", value);
+	}
+
+	return len;
 }

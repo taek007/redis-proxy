@@ -4,6 +4,8 @@
 #include "fmacros.h"
 #include "dict.h"
 #include "adlist.h"
+#include "bio.h"
+#include "rdb.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,12 +19,10 @@
 #include <netinet/in.h>
 #include <signal.h>
 #include <assert.h>
-
 #include "anet.h"
 #include "ae.h"
 #include "sds.h"
 #include "zmalloc.h"
-
 
 /* Error codes */
 #define REDIS_OK				0
@@ -49,10 +49,11 @@
 #define REDIS_MIN_RESERVED_FDS 32
 #define REDIS_EVENTLOOP_FDSET_INCR (REDIS_MIN_RESERVED_FDS+96)
 #define REDIS_MAX_CLIENTS 10000 /* 最大所支持的用户数目 */
+#define REDIS_LONGSTR_SIZE      21          /* Bytes needed for long -> str */
 
 /* Static server configuration */
 #define REDIS_DEFAULT_HZ        10 
-#define REDIS_SERVERPORT		6379 /* TCP port */
+#define REDIS_SERVERPORT			16379 /* TCP port */
 #define REDIS_TCP_BACKLOG       511     /* TCP listen backlog */
 #define REDIS_BINDADDR_MAX		16
 #define REDIS_IP_STR_LEN INET6_ADDRSTRLEN
@@ -61,7 +62,41 @@
 #define REDIS_SHARED_SELECT_CMDS 10
 #define REDIS_SHARED_INTEGERS 10000
 #define REDIS_SHARED_BULKHDR_LEN 32
-#define REDIS_MAXIDLETIME       0       /* default client timeout: infinite */
+#define REDIS_MAXIDLETIME       0			 /* default client timeout: infinite */
+#define REDIS_DEFAULT_RDB_COMPRESSION 1
+#define REDIS_DEFAULT_RDB_CHECKSUM 1
+#define REDIS_AOF_REWRITE_PERC  100
+#define REDIS_AOF_REWRITE_MIN_SIZE (64*1024*1024)
+#define REDIS_AOF_REWRITE_ITEMS_PER_CMD 64
+#define REDIS_DEFAULT_RDB_FILENAME "dump.rdb"
+#define REDIS_DEFAULT_AOF_FILENAME "appendonly.aof"
+#define REDIS_DEFAULT_AOF_REWRITE_INCREMENTAL_FSYNC 1
+#define REDIS_DEFAULT_AOF_NO_FSYNC_ON_REWRITE 0
+
+/* client flags */
+#define REDIS_SLAVE (1<<0)   /* This client is a slave server */
+#define REDIS_MASTER (1<<1)  /* This client is a master server */
+#define REDIS_MONITOR (1<<2) /* This client is a slave monitor, see MONITOR */
+#define REDIS_MULTI (1<<3)   /* This client is in a MULTI context */
+#define REDIS_BLOCKED (1<<4) /* The client is waiting in a blocking operation */
+#define REDIS_DIRTY_CAS (1<<5) /* Watched keys modified. EXEC will fail. */
+#define REDIS_CLOSE_AFTER_REPLY (1<<6) /* Close after writing entire reply. */
+#define REDIS_UNBLOCKED (1<<7) /* This client was unblocked and is stored in
+server.unblocked_clients */
+#define REDIS_LUA_CLIENT (1<<8) /* This is a non connected client used by Lua */
+#define REDIS_ASKING (1<<9)     /* Client issued the ASKING command */
+#define REDIS_CLOSE_ASAP (1<<10)/* Close this client ASAP */
+#define REDIS_UNIX_SOCKET (1<<11) /* Client connected via Unix domain socket */
+#define REDIS_DIRTY_EXEC (1<<12)  /* EXEC will fail for errors while queueing */
+#define REDIS_MASTER_FORCE_REPLY (1<<13)  /* Queue replies even if is master */
+#define REDIS_FORCE_AOF (1<<14)   /* Force AOF propagation of current cmd. */
+#define REDIS_FORCE_REPL (1<<15)  /* Force replication of current cmd. */
+#define REDIS_PRE_PSYNC (1<<16)   /* Instance don't understand PSYNC. */
+#define REDIS_READONLY (1<<17)    /* Cluster client is in read-only state. */
+
+/* 指示 AOF 程序每累积这个量的写入数据
+ * 就执行一次显式的 fsync */
+#define REDIS_AOF_AUTOSYNC_BYTES (1024*1024*32) /* fdatasync every 32MB */
 
 /* Client request types */
 #define REDIS_REQ_INLINE	1
@@ -75,7 +110,17 @@
 /* 对象编码 */
 #define REDIS_ENCODING_RAW 0     /* Raw representation */
 #define REDIS_ENCODING_INT 1     /* Encoded as integer */
+#define REDIS_ENCODING_HT 2      /* Encoded as hash table */
+#define REDIS_ENCODING_ZIPMAP 3  /* Encoded as zipmap */
+#define REDIS_ENCODING_LINKEDLIST 4 /* Encoded as regular linked list */
+#define REDIS_ENCODING_ZIPLIST 5 /* Encoded as ziplist */
+#define REDIS_ENCODING_INTSET 6
+#define REDIS_ENCODING_SKIPLIST 7  /* Encoded as skiplist */
 #define REDIS_ENCODING_EMBSTR 8  /* Embedded sds string encoding */
+
+/* List related stuff */
+#define REDIS_HEAD 0
+#define REDIS_TAIL 1
 
 /* 命令标志 */
 #define REDIS_CMD_WRITE 1                   /* "w" flag */
@@ -92,6 +137,15 @@
 #define REDIS_CMD_SKIP_MONITOR 2048         /* "M" flag */
 #define REDIS_CMD_ASKING 4096               /* "k" flag */
 
+/* Zip structure related defaults */
+#define REDIS_HASH_MAX_ZIPLIST_VALUE 64
+#define REDIS_HASH_MAX_ZIPLIST_ENTRIES 512  // 压缩链表最多能有512项
+#define REDIS_LIST_MAX_ZIPLIST_VALUE 64
+#define REDIS_LIST_MAX_ZIPLIST_ENTRIES 512
+#define REDIS_SET_MAX_INTSET_ENTRIES 512
+#define REDIS_ZSET_MAX_ZIPLIST_ENTRIES 128
+#define REDIS_ZSET_MAX_ZIPLIST_VALUE 64
+
 /* Command call flags, see call() function */
 #define REDIS_CALL_NONE 0
 #define REDIS_CALL_SLOWLOG 1
@@ -99,10 +153,55 @@
 #define REDIS_CALL_PROPAGATE 4
 #define REDIS_CALL_FULL (REDIS_CALL_SLOWLOG | REDIS_CALL_STATS | REDIS_CALL_PROPAGATE)
 
+#define ZSKIPLIST_MAXLEVEL 32 /* Should be enough for 2^32 elements */
+#define ZSKIPLIST_P 0.25      /* Skiplist P = 1/4 */
+
+/* Client flags */
+#define REDIS_CLOSE_ASAP (1<<10)/* Close this client ASAP */
+#define REDIS_MULTI (1<<3)   /* This client is in a MULTI context */
+#define REDIS_FORCE_AOF (1<<14)   /* Force AOF propagation of current cmd. */
+
+/* Sets operations codes */
+#define REDIS_OP_UNION 0
+#define REDIS_OP_DIFF 1
+#define REDIS_OP_INTER 2
+
+/* Anti-warning macro... */
+#define REDIS_NOTUSED(V) ((void) V)
+
+#define REDIS_DBCRON_DBS_PER_CALL 16
+
+#define ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP 20 /* Loopkups per loop. */
+#define ACTIVE_EXPIRE_CYCLE_FAST_DURATION 1000 /* Microseconds */
+#define ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC 25 /* CPU max % for keys collection */
+#define ACTIVE_EXPIRE_CYCLE_SLOW 0
+#define ACTIVE_EXPIRE_CYCLE_FAST 1
+
+/* AOF states */
+#define REDIS_AOF_OFF 0             /* AOF is off */
+#define REDIS_AOF_ON 1              /* AOF is on */
+#define REDIS_AOF_WAIT_REWRITE 2    /* AOF waits rewrite to start appending */
+
+/* Append only defines */
+#define AOF_FSYNC_NO 0
+#define AOF_FSYNC_ALWAYS 1
+#define AOF_FSYNC_EVERYSEC 2
+#define REDIS_DEFAULT_AOF_FSYNC AOF_FSYNC_EVERYSEC
+
+/* Command propagation flags, see propagate() function */
+#define REDIS_PROPAGATE_NONE 0
+#define REDIS_PROPAGATE_AOF 1
+
+typedef long long mstime_t;
 
 /*====================================== define marco ===================================*/
 /* 用于判断objptr是否为sds */
 #define sdsEncodedObject(objptr) (objptr->encoding == REDIS_ENCODING_RAW || objptr->encoding == REDIS_ENCODING_EMBSTR)
+
+/* Using the following macro you can run code inside serverCron() with the
+* specified period, specified in milliseconds.
+* The actual resolution depends on server.hz. */
+#define run_with_period(_ms_) if ((_ms_ <= 1000/server.hz) || !(server.cronloops%((_ms_)/(1000/server.hz))))
 
 /*
 * Redis 对象
@@ -126,14 +225,53 @@ typedef struct redisObject {
 
 typedef struct redisDb {
 	dict *dict;                 // 数据库键空间，保存着数据库中的所有键值对
+	dict *expires;				// 键的过期时间,字典的键为键,字典的值为过期事件 UNIX 时间戳
+	dict *watched_keys;			// 正在被watch命令监视的键
 	int id;                     // 数据库号码
 } redisDb;
 
 /*
- * 因为 I/O 复用的缘故，需要为每个客户端维持一个状态。
- *
- * 多个客户端状态被服务器用链表连接起来。
+ * 事务命令
  */
+typedef struct multiCmd {
+	/* 参数 */
+	robj **argv;
+	/* 参数数量 */
+	int argc;
+	/* 命令指针 */
+	struct redisCommand *cmd;
+} multiCmd;
+
+/*
+* 事务状态
+*/
+typedef struct multiState {
+
+	/* 事务队列，FIFO 顺序 */
+	multiCmd *commands;     /* Array of MULTI commands */
+	int count;              /* 已入队命令计数 */
+	int minreplicas;        /* MINREPLICAS for synchronous replication */
+	time_t minreplicas_timeout; /* MINREPLICAS timeout as unixtime. */
+} multiState;
+
+
+typedef struct rp_queue_element {
+    void *data;
+    struct rp_queue_element *prev;
+    struct rp_queue_element *next;
+} rp_queue_element_t;
+
+typedef struct {
+    size_t size;
+    rp_queue_element_t *first;
+    rp_queue_element_t *last;
+} rp_queue_t;
+
+/* 
+* 因为 I/O 复用的缘故，需要为每个客户端维持一个状态。
+*
+* 多个客户端状态被服务器用链表连接起来。
+*/
 typedef struct redisClient {
 	int fd; //  套接字描述符
 
@@ -168,12 +306,21 @@ typedef struct redisClient {
 	char buf[REDIS_REPLY_CHUNK_BYTES];
 
 	time_t lastinteraction; // 客户端最后一次和服务器互动的时间
+	/* 客户端状态标志 */
+	int flags;              /* REDIS_SLAVE | REDIS_MONITOR | REDIS_MULTI ... */
 
+	multiState mstate;      /* MULTI/EXEC state */
+
+	list *watched_keys;	    /* 正在被WATCH命令监视的键 */
+	struct redisClient* server;
 	struct redisClient* client;
-
+	
+	sds querybuf_server; // 查询缓冲区
+	 rp_queue_t queue;
+	 int type;   //1 set  2 get
 } redisClient;
 
-
+  
 
 typedef struct {
     int  size;
@@ -222,6 +369,58 @@ struct redisServer {
 
 	time_t unixtime; // 记录时间
 	long long mstime; // 这个精度要高一些
+	size_t hash_max_ziplist_value;
+	size_t hash_max_ziplist_entries;
+	size_t list_max_ziplist_value;
+	size_t list_max_ziplist_entries;
+	size_t set_max_intset_entries;
+	size_t zset_max_ziplist_entries;
+	size_t zset_max_ziplist_value;
+
+	/* 有关于数据库存储的一些量 */
+	pid_t rdb_child_pid;   /* PID of RDB saving child */
+	char *rdb_filename;             /* Name of RDB file */
+	int rdb_compression;            /* Use compression in RDB? */
+	int rdb_checksum;               /* Use RDB checksum? */
+
+	/* 一些关于数据库文件存储加载的变量 */
+	int loading;					/* We are loading data from disk if true */
+	off_t loading_total_bytes;		/* 正在载入的数据大小 */
+	off_t loading_loaded_bytes;		/* 已载入的数据的大小 */
+
+	time_t loading_start_time;		/* 开始进行载入的时间 */
+	off_t loading_process_events_interval_bytes;
+
+	int cronloops;					/* serverCron()函数的运行次数计数器 */
+
+	/* aof相关的变量 */
+	int aof_state;                  /* REDIS_AOF_(ON|OFF|WAIT_REWRITE) */
+	char *aof_filename;             /* Name of the AOF file */
+	int aof_rewrite_perc;           /* Rewrite AOF if % growth is > M and... */
+	off_t aof_rewrite_min_size;     /* the AOF file is at least N bytes. */
+	off_t aof_current_size;         /* AOF 文件的当前字节大小. */
+	int aof_rewrite_scheduled;      /* Rewrite once BGSAVE terminates. */
+	pid_t aof_child_pid;            /* 负责进行 AOF 重写的子进程 ID */
+	list *aof_rewrite_buf_blocks;   /* AOF 重写缓存链表，链接着多个缓存块. */
+	sds aof_buf;      /* AOF 缓冲区, written before entering the event loop */
+	int aof_fd;       /* AOF 文件的描述符 */
+	int aof_last_write_status;      /* REDIS_OK or REDIS_ERR */
+	int aof_last_write_errno;       /* Valid if aof_last_write_status is ERR */
+	int aof_selected_db;		    /* AOF 的当前目标数据库 */
+	int aof_rewrite_incremental_fsync; /* 指示是否需要每写入一定量的数据，就主动执行一次 fsync() */
+
+	off_t aof_rewrite_base_size;    /* 最后一次执行 BGREWRITEAOF 时, AOF 文件的大小. */
+	time_t aof_flush_postponed_start; /* 推迟 write 操作的时间 */
+	int aof_fsync_strategy;			/* 文件同步策略 */
+	int aof_no_fsync_on_rewrite;    /* Don't fsync if a rewrite is in prog. */
+								
+	long long dirty;                /* 自从上次 SAVE 执行以来，数据库被修改的次数 */
+	unsigned long aof_delayed_fsync; /* 记录 AOF 的 write 操作被推迟了多少次 */
+	time_t aof_last_fsync;           /* 最后一直执行 fsync 的时间 */
+	time_t aof_rewrite_time_start;	 /* AOF 重写的开始时间 */
+
+	/* 常用命令的快捷连接 */
+	struct redisCommand *multiCommand;
 	server_pools* sev_pools;
 };
 
@@ -249,6 +448,22 @@ struct redisCommand {
 	int flags; // 实际flag 
 
 	// 做了一些简化,删除了一些不常用的域
+	/* Use a function to determine keys arguments in a command line.
+	* Used for Redis Cluster redirect. */
+	
+	// 从命令中判断命令的键参数。在 Redis 集群转向时使用。
+	redisGetKeysProc *getkeys_proc;
+
+	/* What keys should be loaded in background when calling this command? */
+	// 指定哪些参数是 key
+	int firstkey; /* The first argument that's a key (0 = no keys) */
+	int lastkey;  /* The last argument that's a key */
+	int keystep;  /* The step between first and last key */
+
+	// 统计信息
+	// microseconds 记录了命令执行耗费的总毫微秒数
+	// calls 是命令被执行的总次数
+	long long microseconds, calls;
 };
 
 
@@ -267,7 +482,173 @@ struct sharedObjectsStruct {
 		*bulkhdr[REDIS_SHARED_BULKHDR_LEN];  /* "$<value>\r\n" */
 };
 
+//
+// hashTypeIterator 哈希对象的迭代器
+//
+typedef struct {
+	// 被迭代的哈希对象
+	robj *subject;
+	// 哈希对象的编码
+	int encoding;
+	// 域指针和值指针
+	unsigned char *fptr, *vptr;
+	// 字典迭代器和指向当前迭代字典节点的指针,在迭代HT编码的哈希对象时使用
+	dictIterator *di;
+	dictEntry *de;
+} hashTypeIterator;
+
+#define REDIS_HASH_KEY 1
+#define REDIS_HASH_VALUE 2
+
+
+/*
+ * 列表迭代器对象
+ */
+typedef struct {
+	/* 列表对象 */
+	robj *subject;
+	/* 对象所使用的编码 */
+	unsigned char encoding;
+	/* 迭代的方向 */
+	unsigned char direction;
+	/* ziplist索引,迭代ziplist编码的列表时使用 */
+	unsigned char *zi;
+	/* 链表节点的指针,迭代双端链表编码的列表时使用 */
+	listNode *ln;
+} listTypeIterator;
+
+/* 
+ * 迭代列表时使用的记录结构，
+ * 用于保存迭代器，以及迭代器返回的列表节点。
+ */
+typedef struct {
+
+	/* 列表迭代器 */
+	listTypeIterator *li;
+
+	/* ziplist 节点索引 */
+	unsigned char *zi;  
+
+	/* 双端链表节点指针 */
+	listNode *ln; 
+} listTypeEntry;
+
+/*
+ * 多态集合迭代器
+ */
+typedef struct {
+
+	/* 被迭代的对象 */
+	robj *subject;
+
+	/* 对象的编码 */
+	int encoding;
+
+	/* 索引值，编码为 intset 时使用 */
+	int ii;
+
+	/* 字典迭代器，编码为 HT 时使用 */
+	dictIterator *di;
+
+} setTypeIterator;
+/*
+ * 跳跃表
+ */
+typedef struct zskiplist {
+
+	/* 表头节点和表尾节点 */
+	struct zskiplistNode *header, *tail;
+
+	/* 表中节点的数量 */
+	unsigned long length;
+
+	/* 表中层数最大的节点的层数 */
+	int level;
+
+} zskiplist;
+
+/*
+ * 有序集合
+ */
+typedef struct zset {
+
+	/* 字典，键为成员，值为分值
+	 * 用于支持 O(1) 复杂度的按成员取分值操作 */
+	dict *dict;
+
+	/* 跳跃表，按分值排序成员
+	 * 用于支持平均复杂度为 O(log N) 的按分值定位成员操作
+	 * 以及范围操作 */
+	zskiplist *zsl;
+
+} zset;
+
+
+/*
+ * 跳跃表节点
+ */
+typedef struct zskiplistNode {
+
+	/* 成员对象 */
+	robj *obj;
+
+	/* 分值 */
+	double score;
+
+	/* 后退指针 */
+	struct zskiplistNode *backward;
+
+	/* 层 */
+	struct zskiplistLevel {
+
+		/* 前进指针 */
+		struct zskiplistNode *forward;
+
+		/* 跨度 */
+		unsigned int span;
+
+	} level[];
+
+} zskiplistNode;
+ 
+/* 表示开区间/闭区间范围的结构 */
+typedef struct {
+
+	/* 最小值和最大值 */
+	double min, max;
+
+	/* 指示最小值和最大值是否*不*包含在范围之内
+	 * 值为 1 表示不包含，值为 0 表示包含 */
+	int minex, maxex; /* are min or max exclusive? */
+} zrangespec;
+
+/* Struct to hold an inclusive/exclusive range spec by lexicographic comparison. */
+typedef struct {
+	robj *min, *max;  /* May be set to shared.(minstring|maxstring) */
+	int minex, maxex; /* are min or max exclusive? */
+} zlexrangespec;
+
 /* api */
 int processCommand(redisClient *c);
 void freeClient(redisClient *c);
+void initClientMultiState(redisClient *c);  /* mult.c */
+long long mstime(void);
+long long ustime(void);
+void exitFromChild(int retcode);
+void updateDictResizePolicy(void);
+void freeClientMultiState(redisClient *c);
+void closeListeningSockets(int unlink_unix_socket);
+struct redisCommand *lookupCommand(sds name);
+void aofRewriteBufferReset(void);
+void saveCommand(redisClient *c);
+void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
+	int flags);
+void call(redisClient *c, int flags);
+
+#define RETURN_SET 1
+#define RETURN_GET 2
+#define RETURN_HSET 3
+#define RETURN_HMSET 4
+#define RETURN_HGET 5
+#define RETURN_HMGET 6
 #endif

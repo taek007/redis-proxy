@@ -9,4 +9,7 @@ void mlog(const char *fileName, int lineNum, const char *func, const char *log_s
 int string2ll(const char *s, size_t slen, long long *value);
 int ll2string(char *s, size_t len, long long value);
 int string2l(const char *s, size_t slen, long *lval);
+int d2string(char *buf, size_t len, double value);
+int stringmatchlen(const char *pattern, int patternLen,
+	const char *string, int stringLen, int nocase);
 #endif

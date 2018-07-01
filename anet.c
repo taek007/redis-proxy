@@ -65,7 +65,7 @@ static int anetGenericAccept(char *err, int s, struct sockaddr *sa, socklen_t *l
 	int fd;
 	while (1) {
 		fd = accept(s, sa, len);
-		printf("anetGenericAccept %d\n", fd);
+		//printf("anetGenericAccept %d %s\n", fd,  strerror(errno));
 		if (fd == -1) {
 			if (errno == EINTR)
 				continue;
@@ -132,6 +132,7 @@ error:
 	s = ANET_ERR;
 end:
 	freeaddrinfo(servinfo);
+
 	return s;
 }
 

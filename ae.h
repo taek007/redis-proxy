@@ -133,5 +133,6 @@ int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id);
 int aeProcessEvents(aeEventLoop *eventLoop, int flags);
 void aeMain(aeEventLoop *eventLoop);
 void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask);
-
+void aeDeleteEventLoop(aeEventLoop *eventLoop);
+void aeSetBeforeSleepProc(aeEventLoop *eventLoop, aeBeforeSleepProc *beforesleep);
 #endif

@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <assert.h>
 #include "sds.h"
+#include "zmalloc.h"
 
 /*
  * 根据给定的初始化字符串 init 和字符串长度 initlen

@@ -70,7 +70,7 @@ int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) { // 添加到某个
     if (mask & AE_WRITABLE) ee.events |= EPOLLOUT;  // 关注可写事件
     ee.data.u64 = 0; // avoid valgrind warning
     ee.data.fd = fd;
-	printf("state->epfd %d, fd %d\n", state->epfd, fd);
+
     if (epoll_ctl(state->epfd, op, fd, &ee) == -1) return -1; // -1代表失败.
 
     return 0; // 0代表成功.

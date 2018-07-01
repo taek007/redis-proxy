@@ -1,12 +1,17 @@
 /* Redis Object implementation. */
 #include "object.h"
 #include "util.h"
+#include "ziplist.h"
 #include "networking.h"
+#include "intset.h"
+#include "t_zset.h"
+
 #include <unistd.h>
 #include <math.h>
 #include <ctype.h>
 
 extern struct sharedObjectsStruct shared;
+extern struct dictType zsetDictType;
 
 /* 
  * 创建一个 REDIS_ENCODING_EMBSTR 编码的字符对象
@@ -83,25 +88,116 @@ void freeStringObject(robj *o) {
 	}
 }
 
+
+/*
+ * 释放列表对象
+ */
+void freeListObject(robj *o) {
+
+	switch (o->encoding) {
+
+	case REDIS_ENCODING_LINKEDLIST:
+		listRelease((list*)o->ptr);
+		break;
+
+	case REDIS_ENCODING_ZIPLIST:
+		zfree(o->ptr);
+		break;
+
+	default:
+		assert(0);
+	}
+}
+
+/*
+ * 释放集合对象
+ */
+void freeSetObject(robj *o) {
+
+	switch (o->encoding) {
+
+	case REDIS_ENCODING_HT:
+		dictRelease((dict*)o->ptr);
+		break;
+
+	case REDIS_ENCODING_INTSET:
+		zfree(o->ptr);
+		break;
+
+	default:
+		assert(NULL);
+	}
+}
+
+/*
+ * 释放有序集合对象
+ */
+void freeZsetObject(robj *o) {
+
+	zset *zs;
+
+	switch (o->encoding) {
+
+	case REDIS_ENCODING_SKIPLIST:
+		zs = o->ptr;
+		dictRelease(zs->dict);
+		zslFree(zs->zsl);
+		zfree(zs);
+		break;
+
+	case REDIS_ENCODING_ZIPLIST:
+		zfree(o->ptr);
+		break;
+
+	default:
+		assert(NULL);
+	}
+}
+
+/*
+ * 释放哈希对象
+ */
+void freeHashObject(robj *o) {
+
+	switch (o->encoding) {
+
+	case REDIS_ENCODING_HT:
+		dictRelease((dict*)o->ptr);
+		break;
+
+	case REDIS_ENCODING_ZIPLIST:
+		zfree(o->ptr);
+		break;
+
+	default:
+		assert(NULL);
+		break;
+	}
+}
+
 /*
  * 为对象的引用计数减一
- *
+ * 
  * 当对象的引用计数降为 0 时，释放对象。
  */
 void decrRefCount(robj *o) {
 
-	//if (o->refcount <= 0) redisPanic("decrRefCount against refcount <= 0");
+	if (o->refcount <= 0) {
+	   mylog("decrRefCount against refcount <= 0");
+	   assert(0);
+	}
 
 	// 释放对象
 	if (o->refcount == 1) {
 		switch (o->type) {
 		case REDIS_STRING: freeStringObject(o); break;
-		//case REDIS_LIST: freeListObject(o); break;
-		//case REDIS_SET: freeSetObject(o); break;
-		//case REDIS_ZSET: freeZsetObject(o); break;
-		//case REDIS_HASH: freeHashObject(o); break;
+		case REDIS_LIST: freeListObject(o); break;
+		case REDIS_SET: freeSetObject(o); break;
+		case REDIS_ZSET: freeZsetObject(o); break;
+		case REDIS_HASH: freeHashObject(o); break;
 		default:
-			//redisPanic("Unknown object type"); 
+			mylog("Unknown object type");
+			assert(0); 
 			break;
 		}
 		zfree(o);
@@ -343,5 +439,262 @@ robj *createStringObjectFromLongLong(long long value) {
 			o = createObject(REDIS_STRING, sdsfromlonglong(value));
 		}
 	}
+	return o;
+}
+
+/*
+ * 创建一个ZIPLIST编码的哈希对象
+ */
+robj* createHashObject(void) {
+	unsigned char *zl = ziplistNew();
+	robj *o = createObject(REDIS_HASH, zl);
+	o->encoding = REDIS_ENCODING_ZIPLIST;
+	return o;
+}
+
+/*
+ * 创建一个ZIPLIST编码的列表对象
+ */
+robj *createZiplistObject(void) {
+	unsigned char *zl = ziplistNew();
+	robj *o = createObject(REDIS_LIST, zl);
+	o->encoding = REDIS_ENCODING_ZIPLIST;
+	return o;
+}
+
+/*
+ * 创建一个INTSET编码的集合对象
+ */
+robj* createIntsetObject(void) {
+	intset *is = intsetNew();
+	robj *o = createObject(REDIS_SET, is);
+	o->encoding = REDIS_ENCODING_INTSET;
+	return o;
+}
+
+/*
+ * 检查对象 o 中的值能否表示为 long long 类型：
+ *
+ *  - 可以则返回 REDIS_OK ，并将 long long 值保存到 *llval 中。
+ *
+ *  - 不可以则返回 REDIS_ERR
+ */
+int isObjectRepresentableAsLongLong(robj *o, long long *llval) {
+
+	/* INT 编码的 long 值总是能保存为 long long */
+	if (o->encoding == REDIS_ENCODING_INT) {
+		if (llval) *llval = (long)o->ptr;
+		return REDIS_OK;
+		/* 如果是字符串的话，那么尝试将它转换为 long long */
+	}
+	else {
+		return string2ll(o->ptr, sdslen(o->ptr), llval) ? REDIS_OK : REDIS_ERR;
+	}
+}
+
+/*
+ * 尝试从对象中取出 double 值
+ *
+ *  - 转换成功则将值保存在 *target 中，函数返回 REDIS_OK
+ *
+ *  - 否则，函数返回 REDIS_ERR
+ */
+int getDoubleFromObject(robj *o, double *target) {
+	double value;
+	char *eptr;
+
+	if (o == NULL) {
+		value = 0;
+	}
+	else {
+		assert(o->type == REDIS_STRING);
+		/* 尝试从字符串中转换 double 值 */
+		if (sdsEncodedObject(o)) {
+			errno = 0;
+			value = strtod(o->ptr, &eptr);
+			if (isspace(((char*)o->ptr)[0]) ||
+				eptr[0] != '\0' ||
+				(errno == ERANGE &&
+				(value == HUGE_VAL || value == -HUGE_VAL || value == 0)) ||
+				errno == EINVAL ||
+				isnan(value))
+				return REDIS_ERR;
+		}
+		else if (o->encoding == REDIS_ENCODING_INT) { /* INT 编码 */
+			value = (long)o->ptr;
+
+		}
+		else {
+			assert(0);
+		}
+	}
+	/* 返回值 */
+	*target = value;
+	return REDIS_OK;
+}
+
+/*
+ * 创建一个 SKIPLIST 编码的有序集合
+ */
+robj *createZsetObject(void) {
+
+	zset *zs = zmalloc(sizeof(*zs));
+
+	robj *o;
+
+	zs->dict = dictCreate(&zsetDictType, NULL);
+	zs->zsl = zslCreate();
+
+	o = createObject(REDIS_ZSET, zs);
+
+	o->encoding = REDIS_ENCODING_SKIPLIST;
+
+	return o;
+}
+
+/*
+ * 创建一个 ZIPLIST 编码的有序集合
+ */
+robj* createZsetZiplistObject(void) {
+	unsigned char *zl = ziplistNew(); /* ziplist貌似是压缩链表 */
+	robj *o = createObject(REDIS_ZSET, zl);
+	o->encoding = REDIS_ENCODING_ZIPLIST;
+	return o;
+}
+
+/*
+ * 根据 flags 的值，决定是使用 strcmp() 或者 strcoll() 来对比字符串对象。
+ *
+ * 注意，因为字符串对象可能实际上保存的是整数值，
+ * 如果出现这种情况，那么函数先将整数转换为字符串，
+ * 然后再对比两个字符串，
+ * 这种做法比调用 getDecodedObject() 更快
+ *
+ * 当 flags 为 REDIS_COMPARE_BINARY 时，
+ * 对比以二进制安全的方式进行。
+ */
+
+#define REDIS_COMPARE_BINARY (1<<0)
+#define REDIS_COMPARE_COLL (1<<1)
+
+
+int compareStringObjectsWithFlags(robj *a, robj *b, int flags) {
+	assert( a->type == REDIS_STRING && b->type == REDIS_STRING);
+
+	char bufa[128], bufb[128], *astr, *bstr;
+	size_t alen, blen, minlen;
+
+	if (a == b) return 0;
+
+	/* 指向字符串值，并在有需要时，将整数转换为字符串 a */
+	if (sdsEncodedObject(a)) {
+		astr = a->ptr;
+		alen = sdslen(astr);
+	}
+	else {
+		alen = ll2string(bufa, sizeof(bufa), (long)a->ptr);
+		astr = bufa;
+	}
+
+	/* 同样处理字符串 b */
+	if (sdsEncodedObject(b)) {
+		bstr = b->ptr;
+		blen = sdslen(bstr);
+	}
+	else {
+		blen = ll2string(bufb, sizeof(bufb), (long)b->ptr);
+		bstr = bufb;
+	}
+	/* 对比 */
+	if (flags & REDIS_COMPARE_COLL) {
+		return strcoll(astr, bstr);
+	}
+	else {
+		int cmp;
+		minlen = (alen < blen) ? alen : blen;
+		cmp = memcmp(astr, bstr, minlen);
+		if (cmp == 0) return alen - blen;
+		return cmp;
+	}
+}
+
+
+/* Wrapper for compareStringObjectsWithFlags() using binary comparison. */
+int compareStringObjects(robj *a, robj *b) {
+	return compareStringObjectsWithFlags(a, b, REDIS_COMPARE_BINARY);
+}
+
+/*
+ * 如果两个对象的值在字符串的形式上相等，那么返回 1 ， 否则返回 0 。
+ *
+ * 这个函数做了相应的优化，所以比 (compareStringObject(a, b) == 0) 更快一些。
+ */
+int equalStringObjects(robj *a, robj *b) {
+
+	/* 对象的编码为 INT ，直接对比值
+	 * 这里避免了将整数值转换为字符串，所以效率更高 */
+	if (a->encoding == REDIS_ENCODING_INT &&
+		b->encoding == REDIS_ENCODING_INT) {
+		/* If both strings are integer encoded just check if the stored
+		* long is the same. */
+		return a->ptr == b->ptr;
+
+		// 进行字符串对象
+	}
+	else {
+		return compareStringObjects(a, b) == 0;
+	}
+}
+
+/* Note: this function is defined into object.c since here it is where it
+ * belongs but it is actually designed to be used just for INCRBYFLOAT */
+/*
+ * 根据传入的 long double 值，为它创建一个字符串对象
+ *
+ * 对象将 long double 转换为字符串来保存
+ */
+robj *createStringObjectFromLongDouble(long double value) {
+	char buf[256];
+	int len;
+
+	/* We use 17 digits precision since with 128 bit floats that precision
+	* after rounding is able to represent most small decimal numbers in a way
+	* that is "non surprising" for the user (that is, most small decimal
+	* numbers will be represented in a way that when converted back into
+	* a string are exactly the same as what the user typed.) */
+	// 使用 17 位小数精度，这种精度可以在大部分机器上被 rounding 而不改变
+	len = snprintf(buf, sizeof(buf), "%.17Lf", value);
+
+	/* Now remove trailing zeroes after the '.' */
+	// 移除尾部的 0 
+	// 比如 3.1400000 将变成 3.14
+	// 而 3.00000 将变成 3
+	if (strchr(buf, '.') != NULL) {
+		char *p = buf + len - 1;
+		while (*p == '0') {
+			p--;
+			len--;
+		}
+		// 如果不需要小数点，那么移除它
+		if (*p == '.') len--;
+	}
+
+	// 创建对象
+	return createStringObject(buf, len);
+}
+
+/*
+ * 创建一个 LINKEDLIST 编码的列表对象
+ */
+robj *createListObject(void) {
+
+	list *l = listCreate();
+
+	robj *o = createObject(REDIS_LIST, l);
+
+	listSetFreeMethod(l, decrRefCountVoid);
+
+	o->encoding = REDIS_ENCODING_LINKEDLIST;
+
 	return o;
 }

@@ -38,14 +38,14 @@ typedef struct {
 } server_pools;
 
 
-
-int main(){
-	server_pools*  pools;
-	pools = (server_pools*) malloc(sizeof(server_pools));
-	pools->size= 5;
-	pools->server = (redisServer*) malloc(sizeof(redisServer)*pools->size);
-	pools->server[0].fd=10;
-	pools->server[1].fd=20;
-	printf("%d\n", pools->server[0].fd);
-	printf("%d\n", pools->server[1].fd);
-}
+//
+//int main(){
+//	server_pools*  pools;
+//	pools = (server_pools*) malloc(sizeof(server_pools));
+//	pools->size= 5;
+//	pools->server = (redisServer*) malloc(sizeof(redisServer)*pools->size);
+//	pools->server[0].fd=10;
+//	pools->server[1].fd=20;
+//	printf("%d\n", pools->server[0].fd);
+//	printf("%d\n", pools->server[1].fd);
+//}
